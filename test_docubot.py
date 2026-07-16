@@ -28,6 +28,20 @@ class DocuBotTests(unittest.TestCase):
         results = self.bot.retrieve("Where is the auth token generated?", top_k=2)
         self.assertEqual(results[0][0], "AUTH.md")
 
+    def test_endpoint_retrieval_keeps_route_with_description(self):
+        results = self.bot.retrieve("Which endpoint lists all users?", top_k=1)
+
+        self.assertEqual(results[0][0], "API_REFERENCE.md")
+        self.assertIn("GET /api/users", results[0][1])
+
+    def test_refresh_retrieval_keeps_route_with_workflow(self):
+        results = self.bot.retrieve(
+            "How does a client refresh an access token?", top_k=2
+        )
+
+        combined = "\n".join(text for _, text in results)
+        self.assertIn("/api/refresh", combined)
+
     def test_unrelated_question_triggers_refusal(self):
         answer = self.bot.answer_retrieval_only("How do I process payroll?")
         self.assertEqual(answer, "I do not know based on these docs.")

@@ -41,6 +41,25 @@ def tokenize(text):
         if token not in STOP_WORDS
     ]
 
+
+def split_document_sections(text):
+    """Keep each Markdown level-two section together for useful context."""
+    sections = []
+    current = []
+    for line in text.splitlines():
+        if line.startswith("## ") and current:
+            section = "\n".join(current).strip()
+            if section:
+                sections.append(section)
+            current = [line]
+        else:
+            current.append(line)
+
+    final_section = "\n".join(current).strip()
+    if final_section:
+        sections.append(final_section)
+    return sections
+
 class DocuBot:
     def __init__(self, docs_folder="docs", llm_client=None):
         """
@@ -159,13 +178,10 @@ class DocuBot:
             if len(document_matches) < minimum_document_matches:
                 continue
 
-            # Paragraph-sized chunks keep answers focused while retaining the
-            # filename needed for citation and evaluation.
-            chunks = [
-                chunk.strip()
-                for chunk in re.split(r"\n\s*\n", document_text)
-                if chunk.strip()
-            ]
+            # Keep headings with their supporting details. Paragraph-only
+            # splitting separated endpoint names from descriptions and made
+            # otherwise-correct retrievals too weak for grounded generation.
+            chunks = split_document_sections(document_text)
             scored_chunks = [
                 (self.score_document(query, chunk), chunk) for chunk in chunks
             ]
