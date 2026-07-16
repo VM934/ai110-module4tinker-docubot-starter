@@ -7,8 +7,39 @@ Core DocuBot class responsible for:
 - Supporting RAG answers when paired with Gemini (Phase 2)
 """
 
-import os
 import glob
+import math
+import os
+import re
+from collections import Counter, defaultdict
+
+
+TOKEN_RE = re.compile(r"[a-z0-9]+")
+STOP_WORDS = {
+    "a", "all", "an", "and", "any", "are", "as", "at", "be", "by", "does",
+    "docs", "documentation", "for", "from", "how", "i", "in", "is", "it",
+    "mention", "of", "on", "or", "the", "there", "these", "to", "what",
+    "where", "which", "with",
+}
+
+
+def normalize_token(token):
+    """Apply a tiny, predictable stemmer for common documentation wording."""
+    if token.endswith("ies") and len(token) > 4:
+        return f"{token[:-3]}y"
+    for suffix in ("ing", "ion", "ed", "es", "s"):
+        if token.endswith(suffix) and len(token) > len(suffix) + 3:
+            return token[: -len(suffix)]
+    return token
+
+
+def tokenize(text):
+    """Return useful normalized search terms from free-form text."""
+    return [
+        normalize_token(token)
+        for token in TOKEN_RE.findall(text.lower())
+        if token not in STOP_WORDS
+    ]
 
 class DocuBot:
     def __init__(self, docs_folder="docs", llm_client=None):
@@ -63,9 +94,11 @@ class DocuBot:
         Keep this simple: split on whitespace, lowercase tokens,
         ignore punctuation if needed.
         """
-        index = {}
-        # TODO: implement simple indexing
-        return index
+        index = defaultdict(set)
+        for filename, text in documents:
+            for token in set(tokenize(text)):
+                index[token].add(filename)
+        return {token: sorted(filenames) for token, filenames in index.items()}
 
     # -----------------------------------------------------------
     # Scoring and Retrieval (Phase 1)
@@ -81,8 +114,22 @@ class DocuBot:
         - Count how many appear in the text
         - Return the count as the score
         """
-        # TODO: implement scoring
-        return 0
+        query_tokens = tokenize(query)
+        if not query_tokens:
+            return 0.0
+
+        text_tokens = tokenize(text)
+        frequencies = Counter(text_tokens)
+        matched_terms = {token for token in query_tokens if frequencies[token]}
+        if not matched_terms:
+            return 0.0
+
+        # Reward coverage first, then repeated evidence.  The logarithm prevents
+        # a long document from winning only because it repeats a common word.
+        coverage = len(matched_terms) / len(set(query_tokens))
+        evidence = sum(1.0 + math.log(frequencies[token]) for token in matched_terms)
+        phrase_bonus = 1.5 if " ".join(query_tokens) in " ".join(text_tokens) else 0.0
+        return round((coverage * 4.0) + evidence + phrase_bonus, 4)
 
     def retrieve(self, query, top_k=3):
         """
@@ -91,9 +138,43 @@ class DocuBot:
 
         Return a list of (filename, text) sorted by score descending.
         """
+        query_tokens = tokenize(query)
+        if not query_tokens or top_k <= 0:
+            return []
+
+        candidate_files = set()
+        for token in query_tokens:
+            candidate_files.update(self.index.get(token, []))
+        if not candidate_files:
+            return []
+
         results = []
-        # TODO: implement retrieval logic
-        return results[:top_k]
+        unique_query_terms = set(query_tokens)
+        minimum_document_matches = min(2, len(unique_query_terms))
+        for filename, document_text in self.documents:
+            if filename not in candidate_files:
+                continue
+
+            document_matches = unique_query_terms.intersection(tokenize(document_text))
+            if len(document_matches) < minimum_document_matches:
+                continue
+
+            # Paragraph-sized chunks keep answers focused while retaining the
+            # filename needed for citation and evaluation.
+            chunks = [
+                chunk.strip()
+                for chunk in re.split(r"\n\s*\n", document_text)
+                if chunk.strip()
+            ]
+            scored_chunks = [
+                (self.score_document(query, chunk), chunk) for chunk in chunks
+            ]
+            best_score, best_chunk = max(scored_chunks, default=(0.0, ""))
+            if best_score > 0:
+                results.append((best_score, filename, best_chunk))
+
+        results.sort(key=lambda item: (-item[0], item[1]))
+        return [(filename, text) for _, filename, text in results[:top_k]]
 
     # -----------------------------------------------------------
     # Answering Modes
